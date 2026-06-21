@@ -6,18 +6,25 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const cp = require("child_process");
 
 const home = os.homedir();
 const sbDir = path.join(home, ".claude", "statusbar");
 const MARKER = sbDir; // every hook command we add points inside this dir
 const updateDest = path.join(sbDir, "update.js");
 const lifecycleDest = path.join(sbDir, "lifecycle.js");
+const watcherDest = path.join(sbDir, "watcher.sh");
 const settingsPath = path.join(home, ".claude", "settings.json");
 const node = process.execPath;
+
+const AGENT_LABEL = "com.local.claudestatusbar.watcher";
+const agentPlist = path.join(home, "Library", "LaunchAgents", AGENT_LABEL + ".plist");
 
 fs.mkdirSync(sbDir, { recursive: true });
 fs.copyFileSync(path.join(__dirname, "update.js"), updateDest);
 fs.copyFileSync(path.join(__dirname, "lifecycle.js"), lifecycleDest);
+fs.copyFileSync(path.join(__dirname, "watcher.sh"), watcherDest);
+fs.chmodSync(watcherDest, 0o755);
 
 const cmd = (evt) => `${node} ${updateDest} ${evt}`;
 const life = (evt) => `${node} ${lifecycleDest} ${evt}`;
@@ -61,3 +68,30 @@ fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 console.log("Installed status-bar hooks into", settingsPath);
 console.log("Scripts:", updateDest, "and", lifecycleDest);
 console.log("Backup (first run only):", settingsPath + ".bak-statusbar");
+
+// LaunchAgent: a resident watcher that shows the icon whenever the Claude desktop
+// app is open (not just during sessions). Idempotent: boot it out before loading.
+fs.mkdirSync(path.dirname(agentPlist), { recursive: true });
+fs.writeFileSync(agentPlist, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${AGENT_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>${watcherDest}</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+`);
+const uid = process.getuid();
+try { cp.execSync(`launchctl bootout gui/${uid}/${AGENT_LABEL}`, { stdio: "ignore" }); } catch {}
+try {
+  cp.execSync(`launchctl bootstrap gui/${uid} "${agentPlist}"`, { stdio: "ignore" });
+  console.log("Loaded desktop watcher LaunchAgent:", agentPlist);
+} catch (e) {
+  console.log("Wrote watcher LaunchAgent but could not load it; it will start at next login:", agentPlist);
+}

@@ -20,6 +20,9 @@ const read = () => { try { return parseInt(fs.readFileSync(countFile, "utf8"), 1
 const write = (n) => fs.writeFileSync(countFile, String(Math.max(0, n)));
 
 const running = () => { try { cp.execSync(`pgrep -x ${EXEC}`, { stdio: "ignore" }); return true; } catch { return false; } };
+// True while the Claude desktop app is open. The watcher keeps the icon up for it,
+// so session-end must not quit out from under a still-open desktop app.
+const desktopOpen = () => { try { return cp.execSync("lsappinfo find bundleid=com.anthropic.claudefordesktop", { encoding: "utf8" }).trim().length > 0; } catch { return false; } };
 
 if (event === "start") {
   // If the app isn't running, any leftover count is stale (e.g. a prior crash) — reset.
@@ -30,6 +33,6 @@ if (event === "start") {
   write(n);
   if (n <= 0) {
     write(0);
-    cp.spawn("pkill", ["-x", EXEC], { stdio: "ignore" });
+    if (!desktopOpen()) cp.spawn("pkill", ["-x", EXEC], { stdio: "ignore" });
   }
 }
