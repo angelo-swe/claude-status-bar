@@ -104,6 +104,19 @@ cd claude-status-bar
 ```
 Requires the Xcode Command Line Tools (`xcode-select --install`).
 
+## Troubleshooting
+
+**The icon ran for a few seconds, then disappeared.** That's the app exiting on purpose, not a crash. It's a live indicator for Claude Code, so when no Claude session or desktop app is running it has nothing to show and exits cleanly. Run it with Claude Code open (or start a `claude` session) and it stays. You don't launch the app yourself; the session launches it.
+
+**The icon doesn't appear at all.**
+- Make sure a Claude session is actually running. Start a new session (or restart Claude Code) and the bar appears automatically.
+- A session that was already running *before* you installed gets picked up once it does something, but starting a fresh session is the reliable way to bring the bar up the first time.
+- Confirm it's running with `pgrep -x ClaudeStatusBar`: a number means it's running (it may just be hidden, see below); no output means it exited because no Claude session is active.
+
+**It's running but I can't see it.** On a Mac with a notch, a crowded menu bar can hide icons behind the notch. Remove some other menu bar items, or use a menu bar manager (Ice, Bartender), to reveal it.
+
+**Uninstalling.** See [Uninstall](#uninstall) above. Dragging the app to the Trash alone leaves the hooks behind, so run the uninstall command first.
+
 ## Trademark / not affiliated
 
 This is an unofficial, open-source side project. **It is not affiliated with, endorsed by, or sponsored by Anthropic.** "Claude" and the Claude logo are trademarks of Anthropic.

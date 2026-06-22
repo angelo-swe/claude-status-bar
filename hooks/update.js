@@ -34,6 +34,20 @@ process.stdin.on("end", () => {
     } catch {}
   }
 
+  // Register this session as active so the app counts it, even for a session that was
+  // already running before the hooks were installed. Such a session never fired its
+  // one-time SessionStart, so lifecycle.js never created its file, but its per-event
+  // hooks (this script) DO fire live. Touching the file here keeps the app alive while
+  // the session works; SessionEnd removes it.
+  const sid = String(p.session_id || "").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 64);
+  if (sid) {
+    try {
+      const sessDir = path.join(dir, "sessions.d");
+      fs.mkdirSync(sessDir, { recursive: true });
+      fs.writeFileSync(path.join(sessDir, sid), "");
+    } catch {}
+  }
+
   let prev = {};
   try { prev = JSON.parse(fs.readFileSync(statePath, "utf8")); } catch {}
 

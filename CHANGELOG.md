@@ -3,6 +3,11 @@
 All notable changes to Claude Status Bar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.0.5] - 2026-06-22
+
+### Fixed
+- The app no longer quits while a session that was already running before you installed it is actively working. Such a session never fired its one-time `SessionStart` hook, so it wasn't being tracked, even though its other hooks fire normally. The status hooks now register the session on any activity, so any actively-working session keeps the icon alive. (Thanks to the bug report that pinned this down.)
+
 ## [0.0.4] - 2026-06-22
 
 ### Fixed
@@ -44,6 +49,7 @@ All notable changes to Claude Status Bar are documented here. This project follo
 - Signed and notarized DMG so it opens without a Gatekeeper warning.
 - Claude Code plugin marketplace manifest for the plugin install path.
 
+[0.0.5]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.0.5
 [0.0.4]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.0.4
 [0.0.3]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.0.3
 [0.0.2]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.0.2
