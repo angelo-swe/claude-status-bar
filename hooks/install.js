@@ -24,6 +24,7 @@ if (fs.existsSync(oldAgentPlist)) { fs.rmSync(oldAgentPlist); console.log("Remov
 
 fs.mkdirSync(sbDir, { recursive: true });
 fs.rmSync(path.join(sbDir, "watcher.sh"), { force: true });
+fs.rmSync(path.join(sbDir, "state.json"), { force: true }); // retire the legacy single global state file (0.3.0+: per-session files)
 fs.copyFileSync(path.join(__dirname, "update.js"), updateDest);
 fs.copyFileSync(path.join(__dirname, "lifecycle.js"), lifecycleDest);
 

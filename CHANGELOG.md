@@ -3,6 +3,21 @@
 All notable changes to Claude Status Bar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] - 2026-06-25
+
+### Added
+- **Multi-session support.** With several Claude Code sessions running at once, the menu bar now tracks all of them instead of silently overwriting one with another. State is tracked per session (`sessions.d/<id>.json`). The icon and label follow the **most-recently-active** session — it animates while that session works, or shows the amber dot the moment that session needs permission — so the bar always reflects what you're currently doing instead of getting stuck on a background session.
+- A **×N count** appears in the menu bar when two or more sessions are active, so you always know how many are running even when only one is in the label.
+- A new **Sessions** section in the menu lists all your recent Claude sessions — each by its title (Claude Code's auto-generated session name, the same one on your terminal tab), what it's doing (or *Idle*), and elapsed time — with a small dot (amber = awaiting permission, orange = working, muted = idle) that echoes the menu-bar icon. The `×N` count reflects only the actively-working sessions. A session that hasn't done anything in 15 minutes drops off automatically, so a closed or crashed tab can't linger.
+- A **Priority** setting controls which session leads the menu bar when several are active: *Most recent* (default, per #8) or *Awaiting permission* first (so a session blocked on your approval is never hidden behind one that's merely working). The Sessions list and `×N` count are unaffected either way.
+
+### Changed
+- The single global `state.json` is retired in favor of one file per session. Existing recovery paths (Esc interrupt, denied permission, force-quit, stale state) now apply per session. Upgrades migrate automatically.
+
+### Fixed
+- A session that finished a turn **without running any tool** no longer lingers as a stuck "Thinking…". The `Stop` hook doesn't always fire on a no-tool turn, so the status would freeze on thinking; now a thinking session drops to idle once it has gone quiet on *both* its hooks and its transcript for ~2 minutes (an active Agent or a long streaming answer keeps one of those fresh, so a busy session is never affected).
+- The per-session **timers in the Sessions menu tick live** while the menu is open, instead of freezing the moment you clicked.
+
 ## [0.2.2] - 2026-06-25
 
 ### Fixed
