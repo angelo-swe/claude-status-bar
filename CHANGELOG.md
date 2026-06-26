@@ -16,7 +16,7 @@ All notable changes to Claude Status Bar are documented here. This project follo
 - The single global `state.json` is retired in favor of one file per session. Existing recovery paths (Esc interrupt, denied permission, force-quit, stale state) now apply per session. Upgrades migrate automatically.
 
 ### Fixed
-- A session that finished a turn **without running any tool** no longer lingers as a stuck "Thinking…". The `Stop` hook doesn't always fire on a no-tool turn, so the status would freeze on thinking; now, if a thinking session's transcript goes quiet for 30s, it drops to idle.
+- A session that finished a turn **without running any tool** no longer lingers as a stuck "Thinking…". The `Stop` hook doesn't always fire on a no-tool turn, so the status would freeze on thinking; now a thinking session drops to idle once it has gone quiet on *both* its hooks and its transcript for ~2 minutes (an active Agent or a long streaming answer keeps one of those fresh, so a busy session is never affected).
 - The per-session **timers in the Sessions menu tick live** while the menu is open, instead of freezing the moment you clicked.
 
 ## [0.2.2] - 2026-06-25

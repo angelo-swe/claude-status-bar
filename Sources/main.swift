@@ -33,8 +33,10 @@ final class StatusController: NSObject, NSMenuDelegate {
     let idleQuitDelay: TimeInterval = 3 // "not needed" must persist this long before quitting
     let staleAfter: TimeInterval = 900  // a session not seen in 15 min is recovered to idle AND
                                         // dropped from the menu, so a crashed/closed tab can't linger
-    let thinkingIdleAfter: TimeInterval = 30 // a "thinking" session whose transcript has been quiet
-                                             // this long really finished (its Stop hook never fired)
+    let thinkingIdleAfter: TimeInterval = 120 // treat a "thinking" session as finished only when BOTH
+                                              // its last hook (ts) AND its transcript have been quiet
+                                              // this long — either being fresh means it's still working
+                                              // (an Agent keeps firing hooks; a long answer streams)
 
     var rawSessions: [SessionState] = []      // last parsed snapshot of sessions.d/*.json
     var displaySessions: [SessionState] = []  // active (working/permission), most-recent first
@@ -484,15 +486,16 @@ final class StatusController: NSObject, NSMenuDelegate {
     // a session can sit frozen on "thinking" with no event to clear it. Recover three ways:
     //  1. absolute 15-min staleness net (covers force-quit / any frozen state),
     //  2. transcript marker "interrupted by user" (Esc / denied prompt),
-    //  3. a "thinking" session whose transcript has gone quiet for thinkingIdleAfter — real thinking
-    //     streams continuously, so a silent transcript means the turn ended with no Stop hook. ("tool"
-    //     is exempt: a long-running command legitimately writes nothing while it runs.)
+    //  3. a "thinking" session that has gone quiet on BOTH signals — no hook event (ts) AND no
+    //     transcript write — for thinkingIdleAfter. Either being fresh means it's still working: an
+    //     Agent/tool burst keeps firing hooks (fresh ts), and a long no-tool answer streams to the
+    //     transcript (fresh mtime). ("tool" is exempt: a long command does neither while it runs.)
     func recover(_ s: SessionState) -> SessionState {
         var s = s
         guard ["thinking", "tool", "permission"].contains(s.state) else { return s }
         let now = Date().timeIntervalSince1970
         if now - s.ts > staleAfter { s.state = "idle"; s.label = ""; return s }
-        if s.state == "thinking", !s.transcript.isEmpty,
+        if s.state == "thinking", now - s.ts > thinkingIdleAfter, !s.transcript.isEmpty,
            let attrs = try? FileManager.default.attributesOfItem(atPath: s.transcript),
            let m = attrs[.modificationDate] as? Date,
            now - m.timeIntervalSince1970 > thinkingIdleAfter {
