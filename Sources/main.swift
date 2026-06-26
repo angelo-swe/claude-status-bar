@@ -46,6 +46,10 @@ final class StatusController: NSObject, NSMenuDelegate {
 
     enum AnimStyle: String { case web, code, crab }
     var animStyle: AnimStyle = .web
+    // Which session leads the menu bar when several are active: the most-recently-active one
+    // (per issue #8), or any awaiting permission first (so a blocked session is never hidden).
+    enum PriorityMode: String { case recent, permission }
+    var priorityMode: PriorityMode = .recent
     var showTimer = false
     var iconSystem = false // false = brand Orange; true = adaptive black/white (template image)
     var playCompletionSound = false // chime when a turn longer than ~1 min finishes
@@ -90,6 +94,7 @@ final class StatusController: NSObject, NSMenuDelegate {
         if d.object(forKey: "completionSound") != nil { playCompletionSound = d.bool(forKey: "completionSound") }
         if d.object(forKey: "showTerminalApps") != nil { showTerminalApps = d.bool(forKey: "showTerminalApps") }
         if let s = d.string(forKey: "animStyle"), let st = AnimStyle(rawValue: s) { animStyle = st }
+        if let p = d.string(forKey: "priorityMode"), let pm = PriorityMode(rawValue: p) { priorityMode = pm }
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -238,16 +243,26 @@ final class StatusController: NSObject, NSMenuDelegate {
         timerItem.state = showTimer ? .on : .off
         menu.addItem(timerItem)
 
+        let termToggle = NSMenuItem(title: "Show terminal apps", action: #selector(toggleTerminalApps), keyEquivalent: "")
+        termToggle.target = self
+        termToggle.state = showTerminalApps ? .on : .off
+        menu.addItem(termToggle)
+
         let soundItem = NSMenuItem(title: "Play Completion Sound", action: #selector(toggleSound), keyEquivalent: "")
         soundItem.target = self
         soundItem.state = playCompletionSound ? .on : .off
         if #available(macOS 14.0, *) { soundItem.badge = NSMenuItemBadge(string: "1m+") }
         menu.addItem(soundItem)
 
-        let termToggle = NSMenuItem(title: "Show terminal launchers", action: #selector(toggleTerminalApps), keyEquivalent: "")
-        termToggle.target = self
-        termToggle.state = showTerminalApps ? .on : .off
-        menu.addItem(termToggle)
+        menu.addItem(.separator())
+        menu.addItem(header("Priority"))
+        for (mode, name) in [(PriorityMode.recent, "Most recent"), (PriorityMode.permission, "Awaiting permission")] {
+            let it = NSMenuItem(title: name, action: #selector(choosePriority(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = mode.rawValue
+            it.state = priorityMode == mode ? .on : .off
+            menu.addItem(it)
+        }
 
         menu.addItem(.separator())
         menu.addItem(header("Animation"))
@@ -372,6 +387,13 @@ final class StatusController: NSObject, NSMenuDelegate {
         aggregate()
     }
 
+    @objc func choosePriority(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let pm = PriorityMode(rawValue: raw) else { return }
+        priorityMode = pm
+        UserDefaults.standard.set(raw, forKey: "priorityMode")
+        aggregate()
+    }
+
     // MARK: state polling
 
     func tick() {
@@ -466,12 +488,15 @@ final class StatusController: NSObject, NSMenuDelegate {
             turnStarts.removeAll(); workingLast.removeAll()
         }
 
-        // The menu bar follows the MOST-RECENTLY-ACTIVE session, whatever its state. A fresh
-        // permission request (ts = request time) briefly leads and flashes "Awaiting permission"
-        // to grab attention; as soon as you work in another session that session's ts overtakes
-        // it and the bar follows your work. The ×N badge counts only active sessions; idle ones
-        // stay visible in the menu's Sessions list. When nothing is active the bar just rests.
-        if let lead = active.first {
+        // Which session leads the bar (Priority setting):
+        //  • .recent — the most-recently-active session, whatever its state (per issue #8). A
+        //    fresh permission request briefly leads and flashes "Awaiting permission"; as soon as
+        //    you work elsewhere that session's ts overtakes it and the bar follows your work.
+        //  • .permission — any session awaiting permission wins (most-recent among them), so a
+        //    blocked session is never hidden behind one that's merely working.
+        // Either way the ×N badge counts active sessions and idle ones stay in the Sessions list.
+        let lead = (priorityMode == .permission ? active.first(where: { $0.state == "permission" }) : nil) ?? active.first
+        if let lead = lead {
             if lead.state == "permission" {
                 render(label: "Awaiting permission", color: amber, animate: false, startedAt: 0, dot: true)
             } else {
