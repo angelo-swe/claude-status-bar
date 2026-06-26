@@ -24,6 +24,8 @@ final class StatusController: NSObject, NSMenuDelegate {
     var pollTimer: Timer?
     var animTimer: Timer?
     var frameIdx = 0
+    var menuRefreshTimer: Timer?                        // ticks the open menu's session clocks
+    var menuRowItems: [(NSMenuItem, SessionState)] = [] // open-menu rows, for the live refresh
 
     let launchedAt = Date()
     var notNeededSince: Date?
@@ -31,6 +33,8 @@ final class StatusController: NSObject, NSMenuDelegate {
     let idleQuitDelay: TimeInterval = 3 // "not needed" must persist this long before quitting
     let staleAfter: TimeInterval = 900  // a session not seen in 15 min is recovered to idle AND
                                         // dropped from the menu, so a crashed/closed tab can't linger
+    let thinkingIdleAfter: TimeInterval = 30 // a "thinking" session whose transcript has been quiet
+                                             // this long really finished (its Stop hook never fired)
 
     var rawSessions: [SessionState] = []      // last parsed snapshot of sessions.d/*.json
     var displaySessions: [SessionState] = []  // active (working/permission), most-recent first
@@ -229,10 +233,15 @@ final class StatusController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
 
         // Sessions roster: every recent session (active first, then idle), most-recent within each.
+        menuRowItems.removeAll()
         if !displaySessions.isEmpty {
             menu.addItem(header(displaySessions.count >= 2 ? "Sessions · \(displaySessions.count)" : "Sessions"))
             let now = Date().timeIntervalSince1970
-            for s in displaySessions { menu.addItem(sessionRow(s, now: now)) }
+            for s in displaySessions {
+                let it = sessionRow(s, now: now)
+                menuRowItems.append((it, s)) // remember rows so the open menu can tick them live
+                menu.addItem(it)
+            }
             menu.addItem(.separator())
         }
 
@@ -296,6 +305,27 @@ final class StatusController: NSObject, NSMenuDelegate {
         menu.addItem(q)
     }
 
+    // NSMenu builds its items once on open and never rebuilds while shown, so the per-session
+    // clocks (and the bar clock) would freeze. Tick them every second while the menu is open.
+    func menuWillOpen(_ menu: NSMenu) {
+        let t = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in self?.refreshOpenMenu() }
+        RunLoop.main.add(t, forMode: .common)
+        RunLoop.main.add(t, forMode: .eventTracking) // status-item menus track in this mode
+        menuRefreshTimer = t
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        menuRefreshTimer?.invalidate(); menuRefreshTimer = nil
+        menuRowItems.removeAll()
+    }
+
+    func refreshOpenMenu() {
+        let now = Date().timeIntervalSince1970
+        for (item, s) in menuRowItems { item.attributedTitle = sessionRowTitle(s, now: now) }
+        applyTitle() // keep the menu-bar clock live while the menu is open, too
+        statusItem.button?.needsDisplay = true
+    }
+
     func header(_ title: String) -> NSMenuItem {
         if #available(macOS 14.0, *) { return NSMenuItem.sectionHeader(title: title) }
         let it = NSMenuItem(title: title, action: nil, keyEquivalent: "")
@@ -312,6 +342,16 @@ final class StatusController: NSObject, NSMenuDelegate {
         // Dot echoes the menu-bar language: amber = awaiting permission, orange = working, muted = idle.
         let dotColor: NSColor = isPerm ? amber : (working ? (iconColor ?? .secondaryLabelColor) : .tertiaryLabelColor)
         it.image = sessionDot(dotColor)
+        it.attributedTitle = sessionRowTitle(s, now: now)
+        return it
+    }
+
+    // The row's text (name · verb · elapsed clock). Split out so the OPEN menu can re-render the
+    // live clock every second — NSMenu builds its items only on open, so without this the timers
+    // freeze the moment you click the menu.
+    func sessionRowTitle(_ s: SessionState, now: Double) -> NSAttributedString {
+        let working = s.state == "thinking" || s.state == "tool"
+        let isPerm = s.state == "permission"
         let line = NSMutableAttributedString()
         let name = s.name.count > 34 ? String(s.name.prefix(33)) + "…" : s.name
         line.append(NSAttributedString(string: name,
@@ -327,8 +367,7 @@ final class StatusController: NSObject, NSMenuDelegate {
                 .font: NSFont.monospacedDigitSystemFont(ofSize: 0, weight: .regular),
             ]))
         }
-        it.attributedTitle = line
-        return it
+        return line
     }
 
     // Small filled dot (amber = permission, orange/system = working) shown before a session row.
@@ -440,17 +479,26 @@ final class StatusController: NSObject, NSMenuDelegate {
         return out
     }
 
-    // Per-session recovery, identical semantics to the old single-file path: Stop fires on
-    // normal completion but NOT on an Esc interrupt or a denied permission prompt (Claude Code
-    // writes "interrupted by user" to the transcript and ends with no hook, freezing the file).
-    // Recover off that marker, with an absolute 15-min staleness net. Force-quit writes no
-    // marker; lifecycle.js deletes the file. Full rationale in CLAUDE.md.
+    // Per-session recovery. The Stop hook fires on normal completion but NOT on an Esc interrupt,
+    // a denied permission prompt, OR (commonly) a turn that answers without running any tool — so
+    // a session can sit frozen on "thinking" with no event to clear it. Recover three ways:
+    //  1. absolute 15-min staleness net (covers force-quit / any frozen state),
+    //  2. transcript marker "interrupted by user" (Esc / denied prompt),
+    //  3. a "thinking" session whose transcript has gone quiet for thinkingIdleAfter — real thinking
+    //     streams continuously, so a silent transcript means the turn ended with no Stop hook. ("tool"
+    //     is exempt: a long-running command legitimately writes nothing while it runs.)
     func recover(_ s: SessionState) -> SessionState {
         var s = s
         guard ["thinking", "tool", "permission"].contains(s.state) else { return s }
-        let age = Date().timeIntervalSince1970 - s.ts
-        if age > staleAfter { s.state = "idle"; s.label = "" }
-        else if let last = lastLine(ofFileAt: s.transcript), last.contains("interrupted by user") {
+        let now = Date().timeIntervalSince1970
+        if now - s.ts > staleAfter { s.state = "idle"; s.label = ""; return s }
+        if s.state == "thinking", !s.transcript.isEmpty,
+           let attrs = try? FileManager.default.attributesOfItem(atPath: s.transcript),
+           let m = attrs[.modificationDate] as? Date,
+           now - m.timeIntervalSince1970 > thinkingIdleAfter {
+            s.state = "idle"; s.label = ""; return s
+        }
+        if let last = lastLine(ofFileAt: s.transcript), last.contains("interrupted by user") {
             s.state = "idle"; s.label = ""
         }
         return s
