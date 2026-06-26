@@ -1,12 +1,24 @@
 import Cocoa
 
+// One session's status, parsed from ~/.claude/statusbar/sessions.d/<id>.json.
+struct SessionState {
+    var state: String
+    var label: String
+    var project: String
+    var title: String       // Claude Code's ai-title (the terminal-tab name); falls back to project
+    var sessionId: String
+    var transcript: String
+    var startedAt: Double
+    var ts: Double
+    var name: String { !title.isEmpty ? title : (project.isEmpty ? "session" : project) }
+}
+
 final class StatusController: NSObject, NSMenuDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    let statePath = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/state.json")
     let sessionsDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/sessions.d")
     let claudeDesktopBundleID = "com.anthropic.claudefordesktop"
 
-    var lastMTime: Date = .distantPast
+    var lastSig = ""           // signature of sessions.d (names + mtimes); reload only on change
     var pollTimer: Timer?
     var animTimer: Timer?
     var frameIdx = 0
@@ -15,8 +27,12 @@ final class StatusController: NSObject, NSMenuDelegate {
     var notNeededSince: Date?
     let launchGrace: TimeInterval = 5   // settle time after launch before we may quit
     let idleQuitDelay: TimeInterval = 3 // "not needed" must persist this long before quitting
+    let staleAfter: TimeInterval = 900  // a session not seen in 15 min is recovered to idle AND
+                                        // dropped from the menu, so a crashed/closed tab can't linger
 
-    var current: [String: Any] = [:]
+    var rawSessions: [SessionState] = []      // last parsed snapshot of sessions.d/*.json
+    var displaySessions: [SessionState] = []  // active (working/permission), most-recent first
+    var activeCount = 0
     var activeBase = ""        // label without the elapsed clock
     var startedAt: Double = 0  // unix seconds the current turn began (0 = no clock)
     var activeColor: NSColor? = nil
@@ -37,8 +53,8 @@ final class StatusController: NSObject, NSMenuDelegate {
         s.volume = 0.7 // the clip is loud at full system volume; play it a bit softer
         return s
     }()
-    var prevEff = ""               // last effective state, for detecting turn completion
-    var lastTurnStart: Double = 0  // active turn's start time, for the 1-minute gate
+    var turnStarts: [String: Double] = [:]  // per-session turn start, for the 1-min completion chime
+    var workingLast: Set<String> = []       // sessions working on the previous tick (chime edge-detect)
     var iconColor: NSColor? { iconSystem ? nil : brand } // nil => render as an adaptive template
     let codeGlyphs = ["✻", "✽", "✶", "✳", "✢"]
     let codePeaks: [CGFloat] = [1.0, 1.0, 1.0, 1.0, 1.0]
@@ -188,6 +204,15 @@ final class StatusController: NSObject, NSMenuDelegate {
         openItem.target = self
         menu.addItem(openItem)
         menu.addItem(.separator())
+
+        // Sessions roster: every recent session (active first, then idle), most-recent within each.
+        if !displaySessions.isEmpty {
+            menu.addItem(header(displaySessions.count >= 2 ? "Sessions · \(displaySessions.count)" : "Sessions"))
+            let now = Date().timeIntervalSince1970
+            for s in displaySessions { menu.addItem(sessionRow(s, now: now)) }
+            menu.addItem(.separator())
+        }
+
         menu.addItem(header("Options"))
 
         let timerItem = NSMenuItem(title: "Show timer", action: #selector(toggleTimer), keyEquivalent: "")
@@ -240,6 +265,46 @@ final class StatusController: NSObject, NSMenuDelegate {
         return it
     }
 
+    // One "project · verb  1m 2s" row, with a leading state-colored dot that echoes the
+    // menu-bar icon. action:nil => auto-disabled + dimmed, matching the Version row.
+    func sessionRow(_ s: SessionState, now: Double) -> NSMenuItem {
+        let it = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        let working = s.state == "thinking" || s.state == "tool"
+        let isPerm = s.state == "permission"
+        // Dot echoes the menu-bar language: amber = awaiting permission, orange = working, muted = idle.
+        let dotColor: NSColor = isPerm ? amber : (working ? (iconColor ?? .secondaryLabelColor) : .tertiaryLabelColor)
+        it.image = sessionDot(dotColor)
+        let line = NSMutableAttributedString()
+        let name = s.name.count > 34 ? String(s.name.prefix(33)) + "…" : s.name
+        line.append(NSAttributedString(string: name,
+            attributes: [.foregroundColor: NSColor.labelColor]))
+        let verb = isPerm ? "Awaiting permission" : (working ? (s.label.isEmpty ? "Working" : s.label) : "Idle")
+        line.append(NSAttributedString(string: "  ·  \(verb)",
+            attributes: [.foregroundColor: NSColor.secondaryLabelColor]))
+        if working, s.startedAt > 0 { // only a running session shows the elapsed clock
+            let secs = max(0, Int(now - s.startedAt)), m = secs / 60, sec = secs % 60
+            let clk = m > 0 ? "\(m)m \(sec)s" : "\(sec)s"
+            line.append(NSAttributedString(string: "   \(clk)", attributes: [
+                .foregroundColor: NSColor.tertiaryLabelColor,
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 0, weight: .regular),
+            ]))
+        }
+        it.attributedTitle = line
+        return it
+    }
+
+    // Small filled dot (amber = permission, orange/system = working) shown before a session row.
+    func sessionDot(_ color: NSColor) -> NSImage {
+        let s: CGFloat = 10, d: CGFloat = 7
+        let img = NSImage(size: NSSize(width: s, height: s), flipped: false) { _ in
+            color.setFill()
+            NSBezierPath(ovalIn: NSRect(x: (s - d) / 2, y: (s - d) / 2, width: d, height: d)).fill()
+            return true
+        }
+        img.isTemplate = false
+        return img
+    }
+
     @objc func quit() { NSApp.terminate(nil) }
 
     @objc func openClaude() {
@@ -264,7 +329,7 @@ final class StatusController: NSObject, NSMenuDelegate {
         guard let sys = sender.representedObject as? Bool else { return }
         iconSystem = sys
         UserDefaults.standard.set(iconSystem, forKey: "iconSystem")
-        evaluate() // re-render the current state in the new color
+        aggregate() // re-render the current state in the new color
     }
 
     @objc func chooseStyle(_ sender: NSMenuItem) {
@@ -273,64 +338,117 @@ final class StatusController: NSObject, NSMenuDelegate {
         UserDefaults.standard.set(raw, forKey: "animStyle")
         animTimer?.invalidate(); animTimer = nil // recreate at the new style's fps
         frameIdx = 0
-        evaluate()
+        aggregate()
     }
 
     // MARK: state polling
 
     func tick() {
         checkLifecycle()
-        let fm = FileManager.default
-        guard let attrs = try? fm.attributesOfItem(atPath: statePath),
-              let m = attrs[.modificationDate] as? Date else {
-            evaluate(); return
-        }
-        if m != lastMTime {
-            lastMTime = m
-            if let data = fm.contents(atPath: statePath),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                current = obj
-            }
-        }
-        evaluate()
+        let sig = sessionsSignature()
+        if sig != lastSig { lastSig = sig; rawSessions = loadSessions() }
+        // aggregate() runs every tick (not just on change): the transcript-marker recovery and
+        // the live elapsed clock advance on time, not on a session-file write.
+        aggregate()
     }
 
-    func evaluate() {
-        let state = current["state"] as? String ?? "idle"
-        var label = current["label"] as? String ?? ""
-        let ts = (current["ts"] as? NSNumber)?.doubleValue ?? 0
-        let started = (current["startedAt"] as? NSNumber)?.doubleValue ?? 0
-        let age = Date().timeIntervalSince1970 - ts
+    // "Hash of dir listing + per-file mtime": cheap signature so we re-read sessions.d only
+    // when a session file appears, disappears, or changes. *.tmp atomic-write files are ignored.
+    func sessionsSignature() -> String {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: sessionsDir) else { return "" }
+        var parts: [String] = []
+        for n in names.filter({ $0.hasSuffix(".json") }).sorted() {
+            let p = (sessionsDir as NSString).appendingPathComponent(n)
+            let m = ((try? fm.attributesOfItem(atPath: p))?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            parts.append("\(n):\(m)")
+        }
+        return parts.joined(separator: "|")
+    }
 
-        var eff = state
-        // Stop fires on normal completion but NOT on an Esc interrupt or a denied permission
-        // prompt: Claude Code writes "[Request interrupted by user]" to the transcript and ends
-        // with no hook, freezing state.json. Recover off that marker. (Force-quit writes no
-        // marker; lifecycle.js handles that case.) Full rationale in CLAUDE.md.
-        if state == "thinking" || state == "tool" || state == "permission" {
-            if age > 900 { eff = "idle"; label = "" } // absolute safety net
-            else if let tr = current["transcript"] as? String,
-                    let last = lastLine(ofFileAt: tr),
-                    last.contains("interrupted by user") {
-                eff = "idle"; label = ""
+    func loadSessions() -> [SessionState] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: sessionsDir) else { return [] }
+        var out: [SessionState] = []
+        for n in names where n.hasSuffix(".json") {
+            let p = (sessionsDir as NSString).appendingPathComponent(n)
+            guard let data = fm.contents(atPath: p),
+                  let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            out.append(SessionState(
+                state: o["state"] as? String ?? "idle",
+                label: o["label"] as? String ?? "",
+                project: o["project"] as? String ?? "",
+                title: o["title"] as? String ?? "",
+                sessionId: o["sessionId"] as? String ?? n,
+                transcript: o["transcript"] as? String ?? "",
+                startedAt: (o["startedAt"] as? NSNumber)?.doubleValue ?? 0,
+                ts: (o["ts"] as? NSNumber)?.doubleValue ?? 0))
+        }
+        return out
+    }
+
+    // Per-session recovery, identical semantics to the old single-file path: Stop fires on
+    // normal completion but NOT on an Esc interrupt or a denied permission prompt (Claude Code
+    // writes "interrupted by user" to the transcript and ends with no hook, freezing the file).
+    // Recover off that marker, with an absolute 15-min staleness net. Force-quit writes no
+    // marker; lifecycle.js deletes the file. Full rationale in CLAUDE.md.
+    func recover(_ s: SessionState) -> SessionState {
+        var s = s
+        guard ["thinking", "tool", "permission"].contains(s.state) else { return s }
+        let age = Date().timeIntervalSince1970 - s.ts
+        if age > staleAfter { s.state = "idle"; s.label = "" }
+        else if let last = lastLine(ofFileAt: s.transcript), last.contains("interrupted by user") {
+            s.state = "idle"; s.label = ""
+        }
+        return s
+    }
+
+    // Aggregate every session into one menu-bar presentation.
+    func aggregate() {
+        let now = Date().timeIntervalSince1970
+        let sessions = rawSessions.map(recover)
+
+        let working = sessions.filter { $0.state == "thinking" || $0.state == "tool" }
+        func isActive(_ s: SessionState) -> Bool { ["thinking", "tool", "permission"].contains(s.state) }
+        // "Active" = working or awaiting permission (the attention-worthy states); drives the bar + count.
+        let active = sessions.filter(isActive).sorted { ($0.ts, $0.startedAt) > ($1.ts, $1.startedAt) }
+        activeCount = active.count
+
+        // Menu roster: EVERY session seen in the last `staleAfter` seconds (idle included), active
+        // ones first then most-recent idle. The age filter drops a crashed/closed tab so it can't
+        // linger as a ghost row.
+        displaySessions = sessions
+            .filter { now - $0.ts < staleAfter }
+            .filter { isActive($0) || !$0.title.isEmpty || !$0.project.isEmpty } // hide nameless just-started sessions
+            .sorted { (isActive($0) ? 1 : 0, $0.ts) > (isActive($1) ? 1 : 0, $1.ts) }
+
+        // Completion chime: per-session, fires once when a turn that ran >= 1 min leaves "working".
+        if playCompletionSound {
+            let nowWorking = Set(working.map { $0.sessionId })
+            for w in working where w.startedAt > 0 { turnStarts[w.sessionId] = w.startedAt }
+            for id in workingLast where !nowWorking.contains(id) {
+                if let start = turnStarts[id], now - start >= 60 { completionSound?.play() }
+                turnStarts[id] = nil
             }
+            workingLast = nowWorking
+        } else {
+            turnStarts.removeAll(); workingLast.removeAll()
         }
 
-        // Chime once when a turn that ran >= 1 min transitions to "done".
-        if (eff == "thinking" || eff == "tool"), started > 0 { lastTurnStart = started }
-        if eff == "done", prevEff != "done", playCompletionSound,
-           lastTurnStart > 0, Date().timeIntervalSince1970 - lastTurnStart >= 60 {
-            completionSound?.play()
-        }
-        if eff == "done" { lastTurnStart = 0 }
-        prevEff = eff
-
-        switch eff {
-        case "thinking":  render(label: label.isEmpty ? "Thinking…" : label, color: iconColor, animate: true,  startedAt: started)
-        case "tool":      render(label: label.isEmpty ? "Working…"  : label, color: iconColor, animate: true,  startedAt: started)
-        case "permission":render(label: "Awaiting permission", color: amber, animate: false, startedAt: 0, dot: true)
-        case "waiting":   render(label: label.isEmpty ? "Waiting" : label, color: iconColor, animate: false, startedAt: 0)
-        default:          render(label: "", color: iconColor, animate: false, startedAt: 0) // done + idle: just the orange spark
+        // The menu bar follows the MOST-RECENTLY-ACTIVE session, whatever its state. A fresh
+        // permission request (ts = request time) briefly leads and flashes "Awaiting permission"
+        // to grab attention; as soon as you work in another session that session's ts overtakes
+        // it and the bar follows your work. The ×N badge counts only active sessions; idle ones
+        // stay visible in the menu's Sessions list. When nothing is active the bar just rests.
+        if let lead = active.first {
+            if lead.state == "permission" {
+                render(label: "Awaiting permission", color: amber, animate: false, startedAt: 0, dot: true)
+            } else {
+                let label = lead.label.isEmpty ? (lead.state == "tool" ? "Working…" : "Thinking…") : lead.label
+                render(label: label, color: iconColor, animate: true, startedAt: lead.startedAt)
+            }
+        } else {
+            render(label: "", color: iconColor, animate: false, startedAt: 0) // all idle/done: resting spark
         }
     }
 
@@ -341,7 +459,10 @@ final class StatusController: NSObject, NSMenuDelegate {
     }
 
     func sessionCount() -> Int {
-        (try? FileManager.default.contentsOfDirectory(atPath: sessionsDir).count) ?? 0
+        // Count every session marker except in-flight *.tmp atomic writes. Legacy empty
+        // markers (pre-upgrade) still count, so a pre-existing session keeps the app alive.
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: sessionsDir) else { return 0 }
+        return names.filter { !$0.hasSuffix(".tmp") }.count
     }
 
     // Stay while Claude desktop is open OR a session is active; otherwise quit after a
@@ -403,25 +524,34 @@ final class StatusController: NSObject, NSMenuDelegate {
 
     func applyTitle() {
         guard let button = statusItem.button else { return }
+        let mono = NSFont.monospacedDigitSystemFont(ofSize: 0, weight: .regular)
         var text = activeBase
         if showTimer, startedAt > 0 {
             let secs = max(0, Int(Date().timeIntervalSince1970 - startedAt))
             let m = secs / 60, s = secs % 60
             text += "  " + (m > 0 ? "\(m)m \(s)s" : "\(s)s") // Claude Code style: "1m 1s" / "43s"
         }
-        if text.isEmpty {
+        // A whisper-quiet "×N" when 2+ sessions are active — restraint over a loud badge.
+        let badge = activeCount >= 2 ? "×\(activeCount)" : ""
+        if text.isEmpty && badge.isEmpty {
             button.imagePosition = .imageOnly
             button.attributedTitle = NSAttributedString(string: "")
             return
         }
         button.imagePosition = .imageLeading
-        // labelColor adapts: white on a dark menu bar, black on a light one. Monospaced
-        // digits keep the elapsed clock from nudging neighboring menu bar icons.
-        let attrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: NSColor.labelColor,
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 0, weight: .regular),
-        ]
-        button.attributedTitle = NSAttributedString(string: " \(text)", attributes: attrs)
+        // labelColor adapts (white on a dark menu bar, black on a light one); the count uses the
+        // same color as the label so it reads as one consistent unit. Monospaced digits keep
+        // widths from nudging neighboring menu bar icons.
+        let title = NSMutableAttributedString()
+        if !text.isEmpty {
+            title.append(NSAttributedString(string: " \(text)",
+                attributes: [.foregroundColor: NSColor.labelColor, .font: mono]))
+        }
+        if !badge.isEmpty {
+            title.append(NSAttributedString(string: "\(text.isEmpty ? " " : "  ")\(badge)",
+                attributes: [.foregroundColor: NSColor.labelColor, .font: mono]))
+        }
+        button.attributedTitle = title
     }
 
     // MARK: icon

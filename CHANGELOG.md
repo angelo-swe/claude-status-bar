@@ -3,6 +3,16 @@
 All notable changes to Claude Status Bar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] - 2026-06-25
+
+### Added
+- **Multi-session support.** With several Claude Code sessions running at once, the menu bar now tracks all of them instead of silently overwriting one with another. State is tracked per session (`sessions.d/<id>.json`). The icon and label follow the **most-recently-active** session — it animates while that session works, or shows the amber dot the moment that session needs permission — so the bar always reflects what you're currently doing instead of getting stuck on a background session.
+- A **×N count** appears in the menu bar when two or more sessions are active, so you always know how many are running even when only one is in the label.
+- A new **Sessions** section in the menu lists all your recent Claude sessions — each by its title (Claude Code's auto-generated session name, the same one on your terminal tab), what it's doing (or *Idle*), and elapsed time — with a small dot (amber = awaiting permission, orange = working, muted = idle) that echoes the menu-bar icon. The `×N` count reflects only the actively-working sessions. A session that hasn't done anything in 15 minutes drops off automatically, so a closed or crashed tab can't linger.
+
+### Changed
+- The single global `state.json` is retired in favor of one file per session. Existing recovery paths (Esc interrupt, denied permission, force-quit, stale state) now apply per session. Upgrades migrate automatically.
+
 ## [0.2.2] - 2026-06-25
 
 ### Fixed
