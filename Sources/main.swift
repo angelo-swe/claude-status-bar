@@ -17,6 +17,8 @@ final class StatusController: NSObject, NSMenuDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let sessionsDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/sessions.d")
     let claudeDesktopBundleID = "com.anthropic.claudefordesktop"
+    let terminalBundleID = "com.apple.Terminal"
+    let ghosttyBundleID = "com.mitchellh.ghostty"
 
     var lastSig = ""           // signature of sessions.d (names + mtimes); reload only on change
     var pollTimer: Timer?
@@ -47,6 +49,7 @@ final class StatusController: NSObject, NSMenuDelegate {
     var showTimer = false
     var iconSystem = false // false = brand Orange; true = adaptive black/white (template image)
     var playCompletionSound = false // chime when a turn longer than ~1 min finishes
+    var showTerminalApps = false    // off by default; reveals Open Terminal / Open Ghostty menu items
     lazy var completionSound: NSSound? = {
         guard let p = Bundle.main.path(forResource: "completion", ofType: "mp3"),
               let s = NSSound(contentsOfFile: p, byReference: true) else { return nil }
@@ -85,6 +88,7 @@ final class StatusController: NSObject, NSMenuDelegate {
         if d.object(forKey: "showTimer") != nil { showTimer = d.bool(forKey: "showTimer") }
         if d.object(forKey: "iconSystem") != nil { iconSystem = d.bool(forKey: "iconSystem") }
         if d.object(forKey: "completionSound") != nil { playCompletionSound = d.bool(forKey: "completionSound") }
+        if d.object(forKey: "showTerminalApps") != nil { showTerminalApps = d.bool(forKey: "showTerminalApps") }
         if let s = d.string(forKey: "animStyle"), let st = AnimStyle(rawValue: s) { animStyle = st }
         let menu = NSMenu()
         menu.delegate = self
@@ -203,6 +207,20 @@ final class StatusController: NSObject, NSMenuDelegate {
         let openItem = NSMenuItem(title: "Open Claude", action: #selector(openClaude), keyEquivalent: "")
         openItem.target = self
         menu.addItem(openItem)
+
+        // Terminal launchers are off by default (the original is desktop-app oriented); the
+        // "Show terminal launchers" toggle in Options reveals them for terminal-centric users.
+        if showTerminalApps {
+            let termItem = NSMenuItem(title: "Open Terminal", action: #selector(openTerminal), keyEquivalent: "")
+            termItem.target = self
+            menu.addItem(termItem)
+            // Only offer Ghostty if it's actually installed.
+            if NSWorkspace.shared.urlForApplication(withBundleIdentifier: ghosttyBundleID) != nil {
+                let ghosttyItem = NSMenuItem(title: "Open Ghostty", action: #selector(openGhostty), keyEquivalent: "")
+                ghosttyItem.target = self
+                menu.addItem(ghosttyItem)
+            }
+        }
         menu.addItem(.separator())
 
         // Sessions roster: every recent session (active first, then idle), most-recent within each.
@@ -225,6 +243,11 @@ final class StatusController: NSObject, NSMenuDelegate {
         soundItem.state = playCompletionSound ? .on : .off
         if #available(macOS 14.0, *) { soundItem.badge = NSMenuItemBadge(string: "1m+") }
         menu.addItem(soundItem)
+
+        let termToggle = NSMenuItem(title: "Show terminal launchers", action: #selector(toggleTerminalApps), keyEquivalent: "")
+        termToggle.target = self
+        termToggle.state = showTerminalApps ? .on : .off
+        menu.addItem(termToggle)
 
         menu.addItem(.separator())
         menu.addItem(header("Animation"))
@@ -307,12 +330,15 @@ final class StatusController: NSObject, NSMenuDelegate {
 
     @objc func quit() { NSApp.terminate(nil) }
 
-    @objc func openClaude() {
+    func openApp(bundleID: String) {
         let ws = NSWorkspace.shared
-        if let url = ws.urlForApplication(withBundleIdentifier: "com.anthropic.claudefordesktop") {
+        if let url = ws.urlForApplication(withBundleIdentifier: bundleID) {
             ws.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
         }
     }
+    @objc func openClaude()   { openApp(bundleID: claudeDesktopBundleID) }
+    @objc func openTerminal() { openApp(bundleID: terminalBundleID) }
+    @objc func openGhostty()  { openApp(bundleID: ghosttyBundleID) }
 
     @objc func toggleTimer() {
         showTimer.toggle()
@@ -323,6 +349,11 @@ final class StatusController: NSObject, NSMenuDelegate {
     @objc func toggleSound() {
         playCompletionSound.toggle()
         UserDefaults.standard.set(playCompletionSound, forKey: "completionSound")
+    }
+
+    @objc func toggleTerminalApps() {
+        showTerminalApps.toggle()
+        UserDefaults.standard.set(showTerminalApps, forKey: "showTerminalApps")
     }
 
     @objc func chooseColor(_ sender: NSMenuItem) {
